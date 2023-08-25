@@ -1,0 +1,466 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+ 
+# 0. Import Relevant Libraries
+
+```{r}
+
+library(dplyr)
+library(e1071)
+library(ggplot2)
+library(gmodels)
+library(lubridate)
+library(NLP)
+library(reshape2)
+library(RColorBrewer)
+library(scales)
+library(SnowballC)
+library(stringr)
+library(syuzhet)
+library(tm)
+library(wordcloud)
+
+```
+
+# 1. Read in data sets
+
+```{r}
+
+#Read in December 2022 data
+chatGPTDataDec <- read.csv("chatGPTNovDec2022.csv", stringsAsFactors = FALSE)
+
+#Read in 2023 data
+chatGPTData2023 <- read.csv("chatGPTJanMar2023.csv", stringsAsFactors = FALSE)
+
+```
+
+# 2. Initial data cleanup 
+
+## a. December 2023 data
+
+```{r}
+
+#Convert created_at to time
+chatGPTDataDec$created_at <- as.POSIXct(chatGPTDataDec$created_at, format = "%Y-%m-%d %H:%M:%S")
+
+#Remove 11/30/22 to have only the month of December
+chatGPTDataDec <- subset(chatGPTDataDec, !format(created_at, "%Y-%m-%d") == "2022-11-30")
+
+#Remove irrelevant columns
+toKeep <- c("created_at","tweet")
+chatGPTDataDec <- chatGPTDataDec[names(chatGPTDataDec) %in% toKeep]
+
+```
+
+## b. 2023 data 
+
+```{r}
+
+#Convert time to date
+chatGPTData2023$date <- as.POSIXct(chatGPTData2023$date, format = "%Y-%m-%d %H:%M:%S")
+
+#Rename columns to match December dataset
+chatGPTData2023 <- chatGPTData2023 %>% rename(created_at = date, tweet = content)
+
+#Remove irrelevant columns
+chatGPTData2023 <- chatGPTData2023[names(chatGPTData2023) %in% toKeep]
+
+#Reorder to match December dataset
+chatGPTData2023 <- chatGPTData2023 %>% select(created_at, tweet)
+
+```
+
+## c. March 2023 subset
+
+```{r}
+
+#Create smaller dataset selecting only March 2023 from second dataset 
+chatGPTDataMar <- subset(chatGPTData2023, format(created_at, "%m") == "03")
+
+```
+
+## d. Dataset with all months combined
+
+```{r}
+
+#Merge dataset into one for time series plot
+largerSet <- rbind(chatGPTData2023, chatGPTDataDec)
+
+#Remove missing values from larger set
+largerSet <- na.omit(largerSet)
+
+```
+
+# 3. Visualizations (larger dataset)
+
+## a. Tweets by day
+
+```{r}
+
+#Number of tweets grouped by day
+tweetsOverTimeDay <- largerSet %>% 
+  group_by(day = date(created_at)) %>% count()
+
+#Create the time series plot
+ggplot(tweetsOverTimeDay, aes(x = day, y = n)) +
+  geom_point(size = 0.5, color = "skyblue1") + 
+  geom_line(color = "skyblue1") +
+  geom_smooth(method = "lm", se = FALSE, color = "red2", size = 0.5) +
+  theme_classic() +
+  labs(title = "Tweets By Day", x = "", y = "Tweet Count") +
+  scale_x_date(date_labels = "%b %d", date_breaks = "7 day") + 
+  scale_y_continuous(labels = comma) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#Top three days
+topThree <- tail(order(tweetsOverTimeDay$n), 3)
+topThreeValues <- tweetsOverTimeDay$n[topThree]
+topThreeDays <- tweetsOverTimeDay$day[topThree]
+topThreeDF <- data.frame(values = topThreeValues, day = topThreeDays)
+print(topThreeDF)
+
+```
+
+## b. Tweets by month
+
+```{r}
+
+#Number of tweets grouped by month
+tweetsOverTimeMonth <- largerSet %>% 
+  group_by(month = month(created_at), year = year(created_at)) %>% count()
+
+#Create a bar plot by month
+ggplot(tweetsOverTimeMonth, aes(x = ymd(paste(year, month, "01", sep = "-")), y = n)) +
+  geom_bar(stat = "identity", fill = "skyblue1") +
+  geom_smooth(method = "lm", se = FALSE, color = "red2", size = 0.5) +
+  theme_classic() +
+  labs(title = "Tweets By Month", x = "Month/Year", y = "Tweet Count") +
+  scale_x_date(date_labels = "%b %Y") +
+  scale_y_continuous(labels = comma) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+# 4. Text wrangling
+
+## a. Functions needed for text wrangling
+
+```{r}
+
+#Merges chat with gpt
+removeChatGPT <- function(x)
+{
+  x <- gsub("(chat|gpt|chatgpt)", " ", x, ignore.case = TRUE)
+}
+
+#Remove twitter handles
+removeTwitterHandles <- function(x) 
+{
+  gsub("@\\w+", " ", x)
+}
+
+#Remove any hyperlinks
+removeHyperlinks <- function(x)
+{
+  gsub("https?://.+", " ", x)
+}
+
+#Remove punctuation
+replacePunctuation <- function(x) 
+{
+  gsub("[[:punct:]]", " ", x)
+}
+
+replaceApostrophe <- function(x) 
+{
+  gsub("’", "", x)
+}
+
+tmMapCleanup <- function(x)
+{
+  
+  #Convert text to all lowercase 
+  print(as.character(x[[2]]))
+  x <- tm_map(x, content_transformer(tolower))
+  
+  #Merge words chat and gpt
+  print(as.character(x[[2]]))
+  x <- tm_map(x,content_transformer(removeChatGPT))
+  
+  #Remove twitter handles
+  print(as.character(x[[2]]))
+  x <- tm_map(x,content_transformer(removeTwitterHandles))
+  
+  #Remove hyperlinks
+  print(as.character(x[[2]]))
+  x <- tm_map(x,content_transformer(removeHyperlinks))
+  
+  #Replace apostrophe
+  print(as.character(x[[2]]))
+  x <- tm_map(x,content_transformer(replaceApostrophe))
+  
+  #Replace punctuation
+  print(as.character(x[[2]]))
+  x <- tm_map(x,content_transformer(replacePunctuation))
+  
+  #Remove word chatGPT
+  print(as.character(x[[2]]))
+  x <- tm_map(x,content_transformer(removeChatGPT))
+  
+  #Remove stop words 
+  print(as.character(x[[2]]))
+  x <- tm_map(x, removeWords, stopwords())
+  
+  #Remove numbers  
+  print(as.character(x[[2]]))
+  x <- tm_map(x, removeNumbers)
+  
+  #Remove additional white space 
+  print(as.character(x[[2]]))
+  x <- tm_map(x, stripWhitespace)
+  
+  #Reduce words to root words by stemming 
+  print(as.character(x[[2]]))
+  x <- tm_map(x, stemDocument)
+  
+  print(as.character(x[[2]]))
+  
+  return(x)
+}
+
+```
+
+## b. Apply text wrangling functions to data
+
+```{r}
+
+#Convert datasets to text corpus for text wrangling
+tweetCorpusDec <- VCorpus(VectorSource(chatGPTDataDec$tweet))
+tweetCorpusMar <- VCorpus(VectorSource(chatGPTDataMar$tweet))
+
+#Apply clean up function
+tweetCorpusMarClean <- tmMapCleanup(tweetCorpusMar)
+tweetCorpusDecClean <- tmMapCleanup(tweetCorpusDec)
+
+```
+
+## c. Convert to term document matrix for word cloud and top ten visualizations
+
+### i. December
+
+```{r}
+
+#Create term document matrix
+fullTDMDec <- TermDocumentMatrix(tweetCorpusDecClean)
+
+#Verify number of rows and columns, check first few terms
+fullTDMDec$ncol
+fullTDMDec$nrow
+fullTDMDec$dimnames$Terms[1:3]
+
+#Remove sparse terms to make dataset smaller (needed in order to convert into matrix)
+smallTDMDec <- removeSparseTerms(fullTDMDec, sparse = 0.99)
+
+#Verify number of rows and columns, check first few terms
+smallTDMDec$ncol
+smallTDMDec$nrow
+smallTDMDec$dimnames$Terms[1:3]
+
+```
+
+### ii. March
+
+```{r}
+
+#Create term document matrix
+fullTDMMar <- TermDocumentMatrix(tweetCorpusMarClean)
+
+#Verify number of rows and columns, check first few terms
+fullTDMMar$ncol
+fullTDMMar$nrow
+fullTDMMar$dimnames$Terms[1:3]
+
+#Remove sparse terms to make dataset smaller (needed in order to convert into matrix)
+smallTDMMar <- removeSparseTerms(fullTDMMar, sparse = 0.99)
+
+#Verify number of rows and columns, check first few terms
+smallTDMMar$ncol
+smallTDMMar$nrow
+smallTDMMar$dimnames$Terms[1:3]
+
+```
+
+# 4. Visualizations
+
+## a. Word clouds 
+
+### i. December
+
+```{r}
+
+#Convert small TDM to matrix
+tdmMatrixDec <- as.matrix(smallTDMDec)
+
+#Calculate row sums
+wDec <- rowSums(tdmMatrixDec)
+
+#Word cloud plot
+set.seed(222)
+wordcloud(words = names(wDec),
+          freq = wDec,
+          random.order = F,
+          colors = brewer.pal(6, "Blues"),
+          rot.per = 0.7,
+          scale = c(3,0.8))
+title(main = "December 2022")
+
+
+```
+
+### ii. March
+
+```{r}
+
+#Convert small TDM to matrix
+tdmMatrixMar <- as.matrix(smallTDMMar)
+
+#Calculate row sums
+wMar <- rowSums(tdmMatrixMar)
+
+#Word cloud plot
+set.seed(222)
+wordcloud(words = names(wMar),
+          freq = wMar,
+          random.order = F,
+          colors = brewer.pal(6, "Blues"),
+          rot.per = 0.7,
+          scale = c(3,0.8))
+title(main = "March 2022")
+
+```
+
+## b. Top ten words 
+
+### i. December
+
+```{r}
+
+#Create data frame from words 
+wordsDFDec <- data.frame(words = names(wDec), counts = wDec, row.names = 1:length(wDec))
+
+#Arrange data frame in order and get top ten
+wordsDFDecTop <- wordsDFDec %>% arrange(desc(counts)) %>% slice(1:10)
+
+#Bar plot showing top ten words 
+ggplot(data = wordsDFDecTop, aes(x = reorder(words, -counts), y = counts)) +
+  geom_bar(stat = "identity", fill = "skyblue1") +
+  theme_classic() +
+  scale_y_continuous(labels = comma) +
+  theme(axis.text.x = element_text(size = 12), legend.position="bottom", legend.title = element_blank(), axis.text.y = element_text(size = 12)) +
+  labs(title = "Top Ten Words - December 2022", x = "", y = "Count of Tweets")
+
+```
+
+### ii. March
+
+```{r}
+
+#Create data frame from words 
+wordsDFMar <- data.frame(words = names(wMar), counts = wMar, row.names = 1:length(wMar))
+
+#Arrange data frame in order and get top ten
+wordsDFMarTop <- wordsDFMar %>% arrange(desc(counts)) %>% slice(1:10)
+
+#Bar plot showing top ten words 
+ggplot(data = wordsDFMarTop, aes(x = reorder(words, -counts), y = counts)) +
+  geom_bar(stat = "identity", fill = "skyblue1") +
+  theme_classic() +
+  scale_y_continuous(labels = comma) +
+  theme(axis.text.x = element_text(size = 12), legend.position="bottom", legend.title = element_blank(), axis.text.y = element_text(size = 12)) +
+  labs(title = "Top Ten Words - March 2023", x = "", y = "Count of Tweets")
+
+```
+
+
+# 5. Sentiment analysis
+
+## a. Calculate sentiment
+
+```{r}
+
+#Get sentiment for December
+corpusTextDec <- sapply(tweetCorpusDecClean, content)
+textDec <- as.character(corpusTextDec)
+textDec[1:10]
+textDec <- iconv(textDec)
+sentimentScoreDec <- get_nrc_sentiment(textDec)
+
+#Get sentiment for March
+corpusTextMar <- sapply(tweetCorpusMarClean, content)
+textMar <- as.character(corpusTextMar)
+textMar[1:10]
+textMar <- iconv(textMar)
+sentimentScoreMar <- get_nrc_sentiment(textMar)
+
+```
+
+## b. Sentiment visualizations
+
+### i. Plot emotions
+
+```{r}
+
+# Calculate column sums for both months
+columnSumsDec <- data.frame(sort(colSums(prop.table(sentimentScoreDec[, 1:8]))))
+columnSumsMar <- data.frame(sort(colSums(prop.table(sentimentScoreMar[, 1:8]))))
+
+#Rename columns 
+colnames(columnSumsDec) <- c("percentDec")
+colnames(columnSumsMar) <- c("percentMar")
+
+#Combine into one data frame for plotting
+combinedColumnSums <- cbind(columnSumsDec, columnSumsMar)
+combinedColumnSums$emotion <- row.names(combinedColumnSums)
+
+#Plot emotions
+meltCombinedColumnSums <- melt(combinedColumnSums)
+ggplot(meltCombinedColumnSums, aes(x = emotion, y = value)) + 
+    geom_bar(aes(fill = variable),stat = "identity",position = "dodge") +
+    theme_classic() +
+    labs(x = 'Emotion', y = 'Percent Tweets', title = "% Tweets by Emotion") +
+    scale_y_continuous(labels = percent_format()) +
+    scale_fill_manual(values = c("azure3", "skyblue1"), labels = c("December 2022", "March 2023")) + 
+    theme(axis.text.x = element_text(size = 12), legend.position="bottom", legend.title = element_blank(), axis.text.y = element_text(size = 12))
+
+```
+
+### ii. Plot sentiment
+
+```{r}
+# Calculate column sums
+columnSumsDecS <- data.frame(sort(colSums(prop.table(sentimentScoreDec[, 9:10]))))
+columnSumsMarS <- data.frame(sort(colSums(prop.table(sentimentScoreMar[, 9:10]))))
+
+#Rename columns
+colnames(columnSumsDecS) <- c("percentDecS")
+colnames(columnSumsMarS) <- c("percentMarS")
+
+#Combined into one data frame for plotting
+combinedColumnSumsS <- cbind(columnSumsDecS, columnSumsMarS)
+combinedColumnSumsS$emotion <- row.names(combinedColumnSumsS)
+
+#Plot emotion
+meltCombinedColumnSumsS <- melt(combinedColumnSumsS)
+ggplot(meltCombinedColumnSumsS, aes(x = emotion, y = value)) + 
+    geom_bar(aes(fill = variable),stat = "identity",position = "dodge") +
+    theme_classic() +
+    labs(x = 'Emotion', y = 'Percent Tweets', title = "% Tweets by Sentiment") +
+    scale_y_continuous(labels = percent_format()) +
+    scale_fill_manual(values = c("azure3", "skyblue1"), labels = c("December 2022", "March 2023")) + 
+    theme(axis.text.x = element_text(size = 12), legend.position="bottom", legend.title = element_blank(), axis.text.y = element_text(size = 12))
+
+```
+
